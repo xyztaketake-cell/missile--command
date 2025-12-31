@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Missile Command for iPad</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            touch-action: none; /* iPadでのスクロール防止 */
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #gameOver {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            display: none;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border: 2px solid #fff;
+        }
+        button {
+            background: #fff;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            font-size: 18px;
+            margin-top: 10px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div>SCORE: <span id="scoreEl">0</span></div>
+</div>
+
+<div id="gameOver">
+    <h1>GAME OVER</h1>
+    <p>Final Score: <span id="finalScore">0</span></p>
+    <button onclick="restartGame()">RETRY</button>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('scoreEl');
+    const gameOverEl = document.getElementById('gameOver');
+    const finalScoreEl = document.getElementById('finalScore');
+
+    let width, height;
+    let score = 0;
+    let gameActive = true;
+    let animationId;
+
+    // ゲームエンティティ
+    let cities = [];
+    let enemyMissiles = [];
+    let playerMissiles = [];
+    let explosions = [];
+    let frameCount = 0;
+
+    // 設定
+    const CONFIG = {
+        cityCount: 6,
+        enemySpeed: 1.5, // 敵の速度
+        playerSpeed: 10, // 自分のミサイルの速度
+        explosionRadius: 50,
+        spawnRate: 100 // フレーム毎の敵出現率（小さいほど頻繁）
+    };
+
+    // リサイズ処理
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+        if (!gameActive && cities.length === 0) initGame(); // 初回ロード時
+    }
+
+    window.addEventListener('resize', resize);
+
+    // 座標クラス
+    class Vector {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+        }
+    }
+
+    // 都市クラス
+    class City {
+        constructor(x) {
+            this.x = x;
+            this.y = height - 20;
+            this.active = true;
+            this.radius = 20;
+        }
+
+        draw() {
+            if (!this.active) return;
+            ctx.fillStyle = '#00f';
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y);
+            ctx.lineTo(this.x - 15, this.y + 15);
+            ctx.lineTo(this.x + 15, this.y + 15);
+            ctx.fill();
+        }
+    }
+
+    // ミサイル基底クラス
+    class Missile {
+        constructor(startX, startY, targetX, targetY, speed, color) {
+            this.pos = new Vector(startX, startY);
+            this.start = new Vector(startX, startY);
+            this.target = new Vector(targetX, targetY);
+            this.speed = speed;
+            this.color = color;
+            this.active = true;
+            
+            // 移動ベクトルの計算
+            const dx = targetX - startX;
+            const dy = targetY - startY;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            this.velocity = new Vector((dx/dist)*speed, (dy/dist)*speed);
+        }
+
+        update() {
+            this.pos.x += this.velocity.x;
+            this.pos.y += this.velocity.y;
+
+            // ターゲット到達判定（プレイヤー）または画面外（敵）
+            // 簡易的にターゲットY座標を超えたら爆発とする（プレイヤーミサイル用）
+            if (this.color === '#fff') { // プレイヤー
+                const dy = this.target.y - this.pos.y;
+                if (Math.abs(dy) < this.speed) {
+                    this.active = false;
+                    explosions.push(new Explosion(this.pos.x, this.pos.y));
+                }
+            } else { // 敵
+                 if (this.pos.y > height) {
+                    this.active = false;
+                 }
+            }
+        }
+
+        draw() {
+            ctx.beginPath();
+            ctx.strokeStyle = this.color;
+            ctx.lineWidth = 2;
+            ctx.moveTo(this.start.x, this.start.y);
+            ctx.lineTo(this.pos.x, this.pos.y);
+            ctx.stroke();
+            
+            // 先端を描画
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(this.pos.x - 1, this.pos.y - 1, 3, 3);
+        }
+    }
+
+    // 爆発クラス
+    class Explosion {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.radius = 0;
+            this.maxRadius = CONFIG.explosionRadius;
+            this.growthRate = 1;
+            this.active = true;
+            this.shrinking = false;
+        }
+
+        update() {
+            if (!this.shrinking) {
+                this.radius += this.growthRate;
+                if (this.radius >= this.maxRadius) this.shrinking = true;
+            } else {
+                this.radius -= this.growthRate;
+                if (this.radius <= 0) this.active = false;
+            }
+        }
+
+        draw() {
+            ctx.beginPath();
+            ctx.fillStyle = `rgba(255, 100, 0, ${this.radius / this.maxRadius})`;
+            ctx.arc(this.x, this.y, Math.max(0, this.radius), 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    function initGame() {
+        resize(); // サイズ確定
+        score = 0;
+        scoreEl.innerText = score;
+        gameActive = true;
+        gameOverEl.style.display = 'none';
+        
+        cities = [];
+        enemyMissiles = [];
+        playerMissiles = [];
+        explosions = [];
+        
+        // 都市を配置
+        const citySpacing = width / (CONFIG.cityCount + 1);
+        for (let i = 1; i <= CONFIG.cityCount; i++) {
+            cities.push(new City(citySpacing * i));
+        }
+
+        animate();
+    }
+
+    function spawnEnemy() {
+        if (frameCount % CONFIG.spawnRate === 0) {
+            const startX = Math.random() * width;
+            // 生きている都市またはランダムな地面をターゲットにする
+            let targetX, targetY;
+            const activeCities = cities.filter(c => c.active);
+            
+            if (activeCities.length > 0 && Math.random() > 0.3) {
+                const targetCity = activeCities[Math.floor(Math.random() * activeCities.length)];
+                targetX = targetCity.x;
+                targetY = targetCity.y;
+            } else {
+                targetX = Math.random() * width;
+                targetY = height;
+            }
+
+            enemyMissiles.push(new Missile(startX, 0, targetX, targetY, CONFIG.enemySpeed, '#f00'));
+        }
+    }
+
+    function checkCollisions() {
+        // 爆発 vs 敵ミサイル
+        explosions.forEach(exp => {
+            enemyMissiles.forEach(enemy => {
+                if (!enemy.active) return;
+                const dx = enemy.pos.x - exp.x;
+                const dy = enemy.pos.y - exp.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist < exp.radius) {
+                    enemy.active = false;
+                    score += 100;
+                    scoreEl.innerText = score;
+                    // 連鎖爆発（オプション）
+                    // explosions.push(new Explosion(enemy.pos.x, enemy.pos.y));
+                }
+            });
+        });
+
+        // 敵ミサイル vs 都市
+        enemyMissiles.forEach(enemy => {
+            if (!enemy.active) return;
+            // 地面付近か判定
+            if (enemy.pos.y > height - 30) {
+                cities.forEach(city => {
+                    if (!city.active) return;
+                    const dx = enemy.pos.x - city.x;
+                    const dy = enemy.pos.y - city.y;
+                    if (Math.sqrt(dx*dx + dy*dy) < 30) {
+                        city.active = false;
+                        enemy.active = false;
+                        explosions.push(new Explosion(city.x, city.y));
+                    }
+                });
+            }
+        });
+    }
+
+    function animate() {
+        if (!gameActive) return;
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.2)'; // 残像効果
+        ctx.fillRect(0, 0, width, height);
+
+        frameCount++;
+        spawnEnemy();
+
+        // プレイヤーミサイル更新・描画
+        playerMissiles = playerMissiles.filter(m => m.active);
+        playerMissiles.forEach(m => { m.update(); m.draw(); });
+
+        // 爆発更新・描画
+        explosions = explosions.filter(e => e.active);
+        explosions.forEach(e => { e.update(); e.draw(); });
+
+        // 敵ミサイル更新・描画
+        enemyMissiles = enemyMissiles.filter(m => m.active);
+        enemyMissiles.forEach(m => { m.update(); m.draw(); });
+
+        // 都市描画
+        const activeCities = cities.filter(c => c.active);
+        cities.forEach(c => c.draw());
+
+        checkCollisions();
+
+        // ゲームオーバー判定
+        if (activeCities.length === 0) {
+            endGame();
+        } else {
+            animationId = requestAnimationFrame(animate);
+        }
+    }
+
+    function shoot(x, y) {
+        if (!gameActive) return;
+        // 画面下部中央から発射
+        const startX = width / 2;
+        const startY = height;
+        playerMissiles.push(new Missile(startX, startY, x, y, CONFIG.playerSpeed, '#fff'));
+    }
+
+    function endGame() {
+        gameActive = false;
+        finalScoreEl.innerText = score;
+        gameOverEl.style.display = 'block';
+    }
+
+    function restartGame() {
+        initGame();
+    }
+
+    // 入力イベント（マウスとタッチ両対応）
+    canvas.addEventListener('mousedown', (e) => {
+        shoot(e.clientX, e.clientY);
+    });
+
+    canvas.addEventListener('touchstart', (e) => {
+        e.preventDefault(); // ダブルタップズームなどを防止
+        for (let i = 0; i < e.changedTouches.length; i++) {
+            const t = e.changedTouches[i];
+            shoot(t.clientX, t.clientY);
+        }
+    }, { passive: false });
+
+    // 開始
+    resize();
+    initGame();
+
+</script>
+</body>
+</html>
